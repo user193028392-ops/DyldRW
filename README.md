@@ -1,4 +1,9 @@
-Discoverer: Kfd334 Target: dyld Mach-O Binary ParsingType: Out-of-Bounds Memory Access (CWE-119 / CWE-125)Impact: Heap Buffer Corruption (Read/Write)📝 DescriptionThis project proves a mathematical logic flaw in MachOFile command tracking.During buffer tracking operations (like removeLoadCommand), data size variables fail to update before a memory move (memmove). The system copies data using outdated sizes, crossing safe memory boundaries.🧮 Math Trigger ConditionThe memory violation occurs when:\(\text{Copy\ Length}>\text{Available\ Buffer\ Space}\)Buffer Size: 0x100 (256 bytes)Command Offset: 0x20 (32 bytes)Available Space: 0x100 - 0x20 = 0xE0 (224 bytes)Copy Length: 0x100 (256 bytes)Result: \(\mathbf{0x100>0xE0}\) — The system reads/writes 0x20 bytes past the boundary, creating an overflow.🧪 AddressSanitizer LogsWhen tested with AddressSanitizer (ASan), the math mismatch triggers a crash, proving the Read/Write flaw:textERROR: AddressSanitizer: heap-buffer-overflow
+Discoverer: Kfd334 Target: dyld Mach-O Binary ParsingType: Out-of-Bounds Memory Access (CWE-119 / CWE-125)Impact: Heap Buffer Corruption (Read/Write)📝 
+
+DescriptionThis project proves a mathematical logic flaw in MachOFile command tracking.During buffer tracking operations (like removeLoadCommand), data size variables fail to update before a memory move (memmove). The system copies data using outdated sizes, crossing safe memory boundaries.🧮 
+
+Math Trigger ConditionThe memory violation occurs when:\(\text{Copy\ Length}>\text{Available\ Buffer\ Space}\)Buffer Size: 0x100 (256 bytes)Command Offset: 0x20 (32 bytes)Available Space: 0x100 - 0x20 = 0xE0 (224 bytes)Copy Length: 0x100 (256 bytes)Result: \(\mathbf{0x100>0xE0}\) — The system reads/writes 0x20 bytes past the boundary, creating an overflow.🧪 
+AddressSanitizer LogsWhen tested with AddressSanitizer (ASan), the math mismatch triggers a crash, proving the Read/Write flaw:textERROR: AddressSanitizer: heap-buffer-overflow
 READ of size 256 at 0x6f109b9e0140
     #0 in memmove
     #1 in main /app/example.mm:19
