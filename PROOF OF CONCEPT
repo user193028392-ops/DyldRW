@@ -1,0 +1,128 @@
+#include <iostream>
+#include <vector>
+#include <cstring>
+#include <cstdint>
+#include <sys/mman.h>
+#include <unistd.h>
+
+// 1. Standard Mach-O Structure Definitions (Apple Specifications)
+#define MH_MAGIC_64           0xFEEDFACF
+#define CPU_TYPE_ARM64        0x0100000C
+#define MH_DYLIB              0x6
+#define LC_SEGMENT_64         0x19
+#define LC_SEGMENT_SPLIT_INFO 0x1E
+
+struct load_command {
+    uint32_t cmd;
+    uint32_t cmdsize;
+};
+
+struct mach_header_64 {
+    uint32_t magic;
+    int32_t  cputype;
+    int32_t  cpusubtype;
+    uint32_t filetype;
+    uint32_t ncmds;
+    uint32_t sizeofcmds;
+    uint32_t flags;
+    uint32_t reserved;
+};
+
+// 2. Simulated dyld3::MachOFile class containing the exact targeted code logic
+class DyldMachOFileTest {
+public:
+    mach_header_64 header;
+
+    void removeLoadCommand(load_command* cmd) {
+        // ====================================================================
+        // PRODUCTION PATH UNDER AUDIT (dyldWR)
+        // ====================================================================
+        unsigned bytesRemaining = this->header.sizeofcmds; 
+        auto nextCmd = (load_command*)((char *)cmd + cmd->cmdsize); 
+        
+        // Simulates optimize_loadcommands() tracking an optimization target
+        bool remove = (cmd->cmd == LC_SEGMENT_SPLIT_INFO); 
+
+        if (remove) { 
+            this->header.sizeofcmds -= cmd->cmdsize; 
+            
+            std::cout << "[*] Executing real memmove logic...\n";
+            std::cout << "[*] Target command size: 0x" << std::hex << cmd->cmdsize << "\n";
+            std::cout << "[*] Problematic bytesRemaining used: 0x" << std::hex << bytesRemaining << " bytes.\n";
+            std::flush(std::cout);
+
+            // This causes the out-of-bounds memory read/write operation
+            ::memmove((void*)cmd, (void*)nextCmd, bytesRemaining); 
+            
+            this->header.ncmds--; 
+        }
+        // ====================================================================
+    }
+};
+
+int main() {
+    std::cout << "=== Standalone Hardware-Boundary Reachability Test ===\n";
+
+    // Setup size parameters to trigger the specific logic discrepancy
+    uint32_t cmd1_size = 0x40;
+    uint32_t cmd2_size = 0x20;
+    uint32_t total_sizeofcmds = cmd1_size + cmd2_size; // 0x60 bytes
+
+    size_t structural_data_size = sizeof(mach_header_64) + total_sizeofcmds;
+    
+    // Query virtual memory layer properties
+    size_t page_size = sysconf(_SC_PAGESIZE);
+    size_t allocation_size = ((structural_data_size + page_size - 1) / page_size) * page_size;
+    
+    // Allocate the working memory block plus space for a hardware guard page
+    void* memory_base = mmap(nullptr, allocation_size + page_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (memory_base == MAP_FAILED) {
+        std::cerr << "[-] Error: Virtual memory allocation failed.\n";
+        return 1;
+    }
+
+    // Set the trailing page to PROT_NONE (Strict hardware boundary)
+    void* guard_page = (char*)memory_base + allocation_size;
+    mprotect(guard_page, page_size, PROT_NONE);
+
+    // Align the structures so the end of the load command array aligns exactly with the guard page boundary
+    char* target_buffer = (char*)guard_page - structural_data_size;
+
+    // Map structural objects directly over the raw byte buffer layout
+    mach_header_64* m_header = reinterpret_cast<mach_header_64*>(target_buffer);
+    load_command* cmd1 = reinterpret_cast<load_command*>(target_buffer + sizeof(mach_header_64));
+    load_command* cmd2 = reinterpret_cast<load_command*>(target_buffer + sizeof(mach_header_64) + cmd1_size);
+
+    // Populate metadata fields with legitimate values to fulfill internal parser prerequisites
+    m_header->magic = MH_MAGIC_64;
+    m_header->cputype = CPU_TYPE_ARM64;
+    m_header->filetype = MH_DYLIB;
+    m_header->ncmds = 2;
+    m_header->sizeofcmds = total_sizeofcmds;
+
+    // First load command data allocation (Stays preserved)
+    cmd1->cmd = LC_SEGMENT_64;
+    cmd1->cmdsize = cmd1_size;
+    std::memset((char*)cmd1 + sizeof(load_command), 0x90, cmd1_size - sizeof(load_command));
+
+    // Target load command positioned at the final boundary limit before unmapped virtual memory
+    cmd2->cmd = LC_SEGMENT_SPLIT_INFO;
+    cmd2->cmdsize = cmd2_size;
+    std::memset((char*)cmd2 + sizeof(load_command), 0x41, cmd2_size - sizeof(load_command));
+
+    std::cout << "[+] Structured Mach-O format established at native memory limits.\n";
+    std::cout << "[*] Memory destination address (cmd2): " << (void*)cmd2 << "\n";
+    std::cout << "[*] Memory source address (nextCmd):   " << (void*)((char*)cmd2 + cmd2_size) << "\n";
+    std::cout << "[*] Guard page fault horizon starts at: " << (void*)guard_page << "\n";
+    std::flush(std::cout);
+
+    // Initialize the engine overlay pointer
+    DyldMachOFileTest* target_instance = reinterpret_cast<DyldMachOFileTest*>(target_buffer);
+
+    // Pass control over to the audited functional path
+    target_instance->removeLoadCommand(cmd2);
+
+    std::cout << "[+] Execution route finished without tracking faults.\n";
+    munmap(memory_base, allocation_size + page_size);
+    return 0;
+}
